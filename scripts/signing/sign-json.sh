@@ -24,7 +24,6 @@ DIRNAME=/usr/bin/dirname
 # Certificate Thumbprint:
 # Certificate Country: 
 
-
 CASDIR=$1
 COUNTRY=$2
 if [[ ! -d $CASDIR ]]; then
@@ -36,8 +35,6 @@ CASDIR=$($REALPATH ${CASDIR})
 
 KEYTYPESTOSIGN=("onboarding")
 CURRDIR=$PWD
-
-
 
 declare -A USAGETOSIGNINGCA=(
 # [TLS]="$CASDIR/cas/TLS/certs/TNG_TLS.pem"
@@ -55,7 +52,6 @@ declare -A USAGETOSIGNINGCFG=(
  [TA]="$CASDIR/cas/TA/openssl.conf"
  )
 
-
 declare -A DIRTOUSAGE=(
   [auth]="TLS"
   [AUTH]="TLS"
@@ -68,10 +64,16 @@ declare -A DIRTOUSAGE=(
   [sca]="TA"
   [SCA]="TA"
 )
+EXCLUDEFROMSIGNING=("CA")
 
+function exists_in_list() { # call: list, item-delimter, value-to-compare
+	LIST=$1
+    DELIMITER=$2
+    VALUE=$3
+    [[ "$LIST" =~ ($DELIMITER|^)$VALUE($DELIMITER|$) ]]
+}
 
-
-ROOT=$($REALPATH $(dirname $(dirname ${BASH_SOURCE[0]})))
+ROOT=$($REALPATH $(dirname $(dirname $(dirname ${BASH_SOURCE[0]}))))
 echo "Examining contents of $ROOT";
 for DIR in $ROOT/*
 do
@@ -80,7 +82,7 @@ do
     if [[ "${ISO3}" == "WHO" ]]; then continue; fi #Skip WHO keys
     echo "Processing Folder: ${ISO3}"
 
-    if [[ ! -z $COUNTRY && $COUNTRY != $DIR ]]; then continue; fi # skip countries 
+    if [[ ! -z $COUNTRY && $COUNTRY != $ISO3 ]]; then continue; fi # skip countries 
     
     for KEYDIR in $DIR/*
     do
@@ -96,19 +98,21 @@ do
 	    echo "    Found Domain: $DOMAIN";
 	    for USAGEDIR in $DOMAINDIR/*/
 	    do
+		
 		if [[ ! -d $USAGEDIR ||  -L $USAGEDIR ]]; then continue; fi #not a directory 
 		USAGEDIR=$($BASENAME "$USAGEDIR")
+
 		if [ ! "${DIRTOUSAGE[$USAGEDIR]+isset}" ]; then
 		    #don't know what to sign with
-		    echo "    Don't know what time of keys are in $USAGEDIR"
+		    echo "    Don't know what type of keys are in $USAGEDIR"
 		    continue
 		fi 
 		USAGE=${DIRTOUSAGE[$USAGEDIR]}
 		USAGEDIR=$DOMAINDIR/$USAGEDIR
-		echo "DD="$DOMAINDIR
-		echo "UD="$USAGEDIR
+		#echo "DD="$DOMAINDIR
+		#echo "UD="$USAGEDIR
 		if [ ! "${USAGETOSIGNINGKEY[$USAGE]+isset}" ]; then
-		    ehco "    Don't know waht to sign keys in $USAGEDIR with"
+		    echo "    Don't know what to sign keys in $USAGEDIR with"
 		    #don't know what to sign with
 		    continue
 		fi
@@ -122,16 +126,24 @@ do
 		echo "      Found Key Usage: $USAGE signing with $SIGNINGKEY";
 		SIGNEDDIR=$USAGEDIR/signed
 		mkdir -p $SIGNEDDIR
+
 		for CERTPATH in $USAGEDIR/*.pem
 		do
 		    CERT=$($BASENAME "${CERTPATH}")
+			CERTPATHCOMP=$($DIRNAME "${CERTPATH}")
 		    SIGNEDCERT=signed.$CERT
 		    CSR=$CERT.csr
-		    SIGNEDTXT=TNG_$USAGE.signed.${CERT%.pem}.txt
+		    SIGNEDTXT=TNG_$USAGE.signed.${CERT%.pem}.json
 		    SIGNEDCERTPATH=$SIGNEDDIR/$SIGNEDCERT
 		    SIGNEDTXTPATH=$SIGNEDDIR/$SIGNEDTXT
 		    CSRPATH=$SIGNEDDIR/$CSR
-		    echo "        Signing CERT $KEY with $SIGNINGCA "
+
+			if exists_in_list $EXCLUDEFROMSIGNING "," ${CERT%.pem}; then
+			echo "         Found $CERT ...excluding it from signing"
+				continue
+			fi
+
+		    echo "        Signing CERT $CERT with $SIGNINGCA "
 		    echo "           x509 Output At: $SIGNEDCERTPATH"
 
 		    cd $CASDIR
@@ -144,7 +156,7 @@ do
 
 		    COUNTRYNAME=`openssl x509 -in ${CERTPATH} -noout -subject -nameopt multiline | grep countryName | awk -F'=' '{print $2}'  | sed 's/\s*//'`
 		    if [ ! -z ${COUNTRYNAME} ]; then
-			echo "           Text Output At ${COUNTRYNAME}: $SIGNEDTXTPATH"
+			echo "           JSON Output At ${COUNTRYNAME}: $SIGNEDTXTPATH"
 			echo '{' > $SIGNEDTXTPATH
 			echo -n '"trustAnchorSignature": "' >> $SIGNEDTXTPATH
 			#echo `openssl x509 -outform der -inform $CERT -out $SIGNEDDIR/${CERT}.der`
@@ -164,14 +176,21 @@ do
 			echo -n `openssl x509 -in ${CERTPATH} -fingerprint -sha256 -noout | awk -F'=' '{print $2}' | sed 's/://g' | sed 's/[A-Z]/\L&/g' ` \
 			     >>  $SIGNEDTXTPATH
 			echo '",' >>  $SIGNEDTXTPATH
-			echo -n '"certificateCountry": "'$COUNTRYNAME \
+			echo -n '"country": "'$COUNTRYNAME \
 			     >>  $SIGNEDTXTPATH
 			echo '"' >>  $SIGNEDTXTPATH
 			echo -n '}' >>  $SIGNEDTXTPATH
+			# cleanup
 		    else 
 			echo "           Skipping Text Output"
 		    fi
+			# clean up temporary data
+			for delTMP in ${CERTPATHCOMP}/signed/*.der ${CERTPATHCOMP}/signed/*.csr ${CERTPATHCOMP}/*.csr ; do
+				#echo cleaning up... $delTMP
+				rm -rf $delTMP
+		 	done
 		done
+
 	for CERTPATH in $USAGEDIR/UP_SYNC.csr
 		do
 		if [[ ! -e $CERTPATH ]]; then continue; fi
@@ -216,9 +235,10 @@ do
 		echo -n '}' >>  $SIGNEDTXTPATH
 		echo move $SIGNEDCERTPATH to $CERTPATHCOMP/${CERTNAME}pem
 		mv $SIGNEDCERTPATH $CERTPATHCOMP/${CERTNAME}pem # move signed pem
-		# cleanup
+		# clean up temporary data
 		 for delTMP in ${CERTPATHCOMP}/signed/*.der ${CERTPATHCOMP}/signed/*.csr ${CERTPATHCOMP}/*.csr ; do
-		 rm -rf $delTMP
+		 	#echo cleaning up... $delTMP
+		 	rm -rf $delTMP
 		 done
 
 		#     else 
@@ -229,4 +249,3 @@ do
 	done
   done
 done
-
